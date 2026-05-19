@@ -129,12 +129,13 @@ def fetch_all_shifts(token: str) -> list[dict]:
             for auth in auth_header_variants(token):
                 try:
                     headers = {**common_headers, **auth}
+                    # Build URL manually — httpx encodes colons in params
+                    # (%3A) which this server rejects with HTTP 400.
                     resp = client.get(
-                        SCHEDULE_ENDPOINT,
-                        params={"startOfWeek": probe_week},
+                        f"{SCHEDULE_ENDPOINT}?startOfWeek={probe_week}",
                         headers=headers,
                     )
-                    log.debug(
+                    log.info(
                         "Auth probe [%s]: HTTP %s",
                         list(auth.keys())[0], resp.status_code,
                     )
@@ -160,7 +161,7 @@ def fetch_all_shifts(token: str) -> list[dict]:
 
             if working_auth is None:
                 raise RuntimeError(
-                    "All auth header formats returned 401/403.\n\n"
+                    "All auth header formats failed (400/401/403).\n\n"
                     "Your LEGION_TOKEN may have expired.  To refresh it:\n"
                     "1. Log into https://enterprise.legion.work/legion/?enterprise=rona\n"
                     "2. Open DevTools (F12 or right-click → Inspect)\n"
@@ -179,8 +180,7 @@ def fetch_all_shifts(token: str) -> list[dict]:
             fetched_weeks.add(week)
             try:
                 resp = client.get(
-                    SCHEDULE_ENDPOINT,
-                    params={"startOfWeek": week},
+                    f"{SCHEDULE_ENDPOINT}?startOfWeek={week}",
                     headers=headers,
                 )
                 if resp.status_code == 200:
