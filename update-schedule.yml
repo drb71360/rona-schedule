@@ -1,0 +1,47 @@
+name: Update RONA Schedule iCal Feed
+
+on:
+  schedule:
+    - cron: "0 */4 * * *"
+  workflow_dispatch:
+
+jobs:
+  update-ical:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Fetch schedule and generate iCal
+        env:
+          LEGION_TOKEN:        ${{ secrets.LEGION_TOKEN }}
+          LEGION_ORG:          ${{ secrets.LEGION_ORG }}
+          LEGION_WEEKS_AHEAD:  "8"
+          LEGION_WEEKS_BEHIND: "2"
+          ICAL_OUTPUT:         "schedule.ics"
+          LOG_LEVEL:           "INFO"
+        run: python scraper.py
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: .
+          publish_branch: gh-pages
+          include_files: |
+            schedule.ics
+            index.html
+          commit_message: "chore: update schedule.ics [skip ci]"
+          enable_jekyll: false
