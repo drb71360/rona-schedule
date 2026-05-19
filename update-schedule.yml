@@ -27,6 +27,7 @@ jobs:
       - name: Fetch schedule and generate iCal
         env:
           LEGION_TOKEN:        ${{ secrets.LEGION_TOKEN }}
+          LEGION_DEVICE_ID:    ${{ secrets.LEGION_DEVICE_ID }}
           LEGION_ORG:          ${{ secrets.LEGION_ORG }}
           LEGION_WEEKS_AHEAD:  "8"
           LEGION_WEEKS_BEHIND: "2"
