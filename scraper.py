@@ -29,6 +29,7 @@ import httpx
 LOG_LEVEL           = os.getenv("LOG_LEVEL", "INFO").upper()
 LEGION_ORG          = os.getenv("LEGION_ORG", "rona")
 LEGION_TOKEN        = os.getenv("LEGION_TOKEN", "")
+LEGION_DEVICE_ID    = os.getenv("LEGION_DEVICE_ID", "")      # DeviceID cookie value
 LEGION_API_ENDPOINT = os.getenv("LEGION_API_ENDPOINT", "")   # optional override
 WEEKS_AHEAD         = int(os.getenv("LEGION_WEEKS_AHEAD",  "8"))
 WEEKS_BEHIND        = int(os.getenv("LEGION_WEEKS_BEHIND", "2"))
@@ -41,7 +42,7 @@ APP_URL  = f"{BASE_URL}/legion"
 
 # ── Confirmed endpoint (discovered via DevTools Network tab) ──────────
 SCHEDULE_ENDPOINT = (
-    LEGION_API_ENDPOINT.split("?")[0]   # strip any existing query params
+    LEGION_API_ENDPOINT.split("?")[0]
     if LEGION_API_ENDPOINT
     else f"{APP_URL}/schedule/getScheduleWeekSummary"
 )
@@ -58,27 +59,18 @@ log = logging.getLogger("legion-ical")
 # ──────────────────────────────────────────────
 def week_starts(weeks_behind: int, weeks_ahead: int) -> list[str]:
     """
-    Return a list of ISO-8601 startOfWeek timestamps covering the requested
-    range.  RONA's Legion install uses Saturday as the start of the scheduling
-    week, expressed as midnight Eastern time = 04:00:00.000Z (UTC, summer).
-
-    e.g. 2026-05-23T04:00:00.000Z  →  Saturday 23 May 2026 00:00 EDT
+    Return ISO-8601 startOfWeek timestamps.
+    RONA uses Saturday as week start = midnight Eastern = T04:00:00.000Z (EDT).
     """
     today = datetime.now(LOCAL_TZ).date()
-
-    # Day-of-week: Mon=0 … Sat=5, Sun=6
-    # Days since last Saturday:
     days_since_saturday = (today.weekday() - 5) % 7
     current_week_start  = today - timedelta(days=days_since_saturday)
 
     starts = []
     for offset in range(-weeks_behind, weeks_ahead + 1):
         week_date = current_week_start + timedelta(weeks=offset)
-        # Express as UTC timestamp: midnight ET = 04:00 UTC during EDT (UTC-4)
-        # Use a fixed 04:00 offset which matches the observed API value.
         iso = f"{week_date.isoformat()}T04:00:00.000Z"
         starts.append(iso)
-
     return starts
 
 
@@ -86,25 +78,34 @@ def week_starts(weeks_behind: int, weeks_ahead: int) -> list[str]:
 # Auth headers — try multiple strategies
 # ──────────────────────────────────────────────
 def auth_header_variants(token: str) -> list[dict]:
-    """Return candidate auth header dicts to try in order."""
+    """
+    Try every plausible auth header format.
+    'authToken' is the most likely — it mirrors the localStorage key name
+    the SPA uses ('legion.authToken') minus the namespace prefix.
+    """
     return [
+        {"authToken": token},                    # most likely — matches LS key
         {"Authorization": f"Bearer {token}"},
         {"Authorization": f"Token {token}"},
         {"X-Auth-Token": token},
         {"X-Legion-Auth-Token": token},
-        # Some enterprise installs use a session cookie instead
-        # (httpx doesn't auto-set cookies; handled separately)
+        {"legion-auth-token": token},
+        {},                                       # cookie-only (no auth header)
     ]
+
+
+def session_cookies() -> dict:
+    """Always send the DeviceID cookie — the server may require it."""
+    cookies = {}
+    if LEGION_DEVICE_ID:
+        cookies["DeviceID"] = LEGION_DEVICE_ID
+    return cookies
 
 
 # ──────────────────────────────────────────────
 # Schedule fetching
 # ──────────────────────────────────────────────
 def fetch_all_shifts(token: str) -> list[dict]:
-    """
-    Call getScheduleWeekSummary once per week for the configured date range.
-    Returns a flat list of all shift dicts found.
-    """
     weeks = week_starts(WEEKS_BEHIND, WEEKS_AHEAD)
     log.info(
         "Fetching %d week(s) from %s → %s via %s",
@@ -120,78 +121,69 @@ def fetch_all_shifts(token: str) -> list[dict]:
     }
 
     all_shifts: list[dict] = []
-    working_auth: dict | None = None   # cache the first successful auth header
+    working_auth: dict | None = None
 
     with httpx.Client(timeout=30, follow_redirects=True) as client:
-        # ── Discover which auth header format works ───────────────
-        if working_auth is None:
-            probe_week = weeks[min(WEEKS_BEHIND, len(weeks) - 1)]  # current week
-            for auth in auth_header_variants(token):
-                try:
-                    headers = {**common_headers, **auth}
-                    # Build URL manually — httpx encodes colons in params
-                    # (%3A) which this server rejects with HTTP 400.
-                    resp = client.get(
-                        f"{SCHEDULE_ENDPOINT}?startOfWeek={probe_week}",
-                        headers=headers,
-                    )
-                    log.info(
-                        "Auth probe [%s]: HTTP %s",
-                        list(auth.keys())[0], resp.status_code,
-                    )
-                    if resp.status_code == 200:
-                        working_auth = auth
-                        log.info(
-                            "Auth header confirmed: %s", list(auth.keys())[0]
-                        )
-                        # Parse this first response too
-                        shifts = _extract_shifts(resp.json())
-                        if shifts:
-                            all_shifts.extend(shifts)
-                            log.info(
-                                "  Week %s → %d shift(s)", probe_week[:10], len(shifts)
-                            )
-                        break
-                    elif resp.status_code == 401:
-                        log.debug("401 with %s", list(auth.keys())[0])
-                    elif resp.status_code == 403:
-                        log.debug("403 with %s", list(auth.keys())[0])
-                except Exception as exc:
-                    log.debug("Probe error: %s", exc)
+        # ── Probe to find working auth format ───────────────────
+        probe_week = weeks[min(WEEKS_BEHIND, len(weeks) - 1)]
+        cookies    = session_cookies()
 
-            if working_auth is None:
-                raise RuntimeError(
-                    "All auth header formats failed (400/401/403).\n\n"
-                    "Your LEGION_TOKEN may have expired.  To refresh it:\n"
-                    "1. Log into https://enterprise.legion.work/legion/?enterprise=rona\n"
-                    "2. Open DevTools (F12 or right-click → Inspect)\n"
-                    "3. Application → Local Storage → enterprise.legion.work\n"
-                    "4. Copy the value of 'legion.authToken'\n"
-                    "5. Update the LEGION_TOKEN GitHub Secret with the new value."
+        for auth in auth_header_variants(token):
+            try:
+                headers = {**common_headers, **auth}
+                resp = client.get(
+                    f"{SCHEDULE_ENDPOINT}?startOfWeek={probe_week}",
+                    headers=headers,
+                    cookies=cookies,
                 )
+                label = list(auth.keys())[0] if auth else "(no auth header)"
+                log.info("Auth probe [%s]: HTTP %s", label, resp.status_code)
 
-        # ── Fetch remaining weeks ─────────────────────────────────
-        fetched_weeks = {weeks[min(WEEKS_BEHIND, len(weeks) - 1)]}
+                if resp.status_code == 200:
+                    working_auth = auth
+                    log.info("✓ Auth confirmed: %s", label)
+                    shifts = _extract_shifts(resp.json())
+                    if shifts:
+                        all_shifts.extend(shifts)
+                        log.info("  Week %s → %d shift(s)", probe_week[:10], len(shifts))
+                    break
+
+            except Exception as exc:
+                log.debug("Probe error: %s", exc)
+
+        if working_auth is None:
+            raise RuntimeError(
+                "All auth formats failed.\n\n"
+                "Most likely cause: LEGION_TOKEN has expired.\n\n"
+                "To get a fresh token:\n"
+                "  1. Log into https://enterprise.legion.work/legion/?enterprise=rona\n"
+                "  2. Right-click anywhere → Inspect → Application tab\n"
+                "  3. Local Storage → enterprise.legion.work\n"
+                "  4. Copy the value of 'legion.authToken'\n"
+                "  5. Update the LEGION_TOKEN secret in GitHub:\n"
+                "     Settings → Secrets and variables → Actions"
+            )
+
+        # ── Fetch remaining weeks ────────────────────────────────
+        fetched = {probe_week}
         headers = {**common_headers, **working_auth}
 
         for week in weeks:
-            if week in fetched_weeks:
+            if week in fetched:
                 continue
-            fetched_weeks.add(week)
+            fetched.add(week)
             try:
                 resp = client.get(
                     f"{SCHEDULE_ENDPOINT}?startOfWeek={week}",
                     headers=headers,
+                    cookies=session_cookies(),
                 )
                 if resp.status_code == 200:
                     shifts = _extract_shifts(resp.json())
-                    if shifts:
-                        all_shifts.extend(shifts)
-                    log.info(
-                        "  Week %s → %d shift(s)", week[:10], len(shifts or [])
-                    )
+                    all_shifts.extend(shifts or [])
+                    log.info("  Week %s → %d shift(s)", week[:10], len(shifts or []))
                 elif resp.status_code == 401:
-                    log.warning("401 on week %s — token may have expired", week[:10])
+                    log.warning("401 on week %s — token expired?", week[:10])
                     break
                 else:
                     log.debug("HTTP %s for week %s", resp.status_code, week[:10])
@@ -203,29 +195,20 @@ def fetch_all_shifts(token: str) -> list[dict]:
 
 
 def _extract_shifts(data: object) -> list[dict]:
-    """
-    Normalise the getScheduleWeekSummary response into a flat list of shifts.
-    Handles multiple possible response shapes.
-    """
     if data is None:
         return []
-
-    # Direct list
     if isinstance(data, list):
         flat = []
         for item in data:
             if _looks_like_shift(item):
                 flat.append(item)
             elif isinstance(item, dict):
-                # Might be a day-grouped entry
                 for key in ("shifts", "scheduledShifts", "assignedShifts"):
                     sub = item.get(key)
                     if isinstance(sub, list):
                         flat.extend(s for s in sub if _looks_like_shift(s))
         return flat
-
     if isinstance(data, dict):
-        # Try common top-level keys
         for key in (
             "shifts", "scheduledShifts", "assignedShifts",
             "schedule", "schedules", "data", "items", "results",
@@ -240,18 +223,13 @@ def _extract_shifts(data: object) -> list[dict]:
                 extracted = _extract_shifts(val)
                 if extracted:
                     return extracted
-
-        # Maybe the dict IS a single shift
         if _looks_like_shift(data):
             return [data]
-
-        # Recurse into any list values
         for val in data.values():
             if isinstance(val, list) and val:
                 extracted = _extract_shifts(val)
                 if extracted:
                     return extracted
-
     return []
 
 
@@ -284,7 +262,6 @@ ICAL_FOOTER = "END:VCALENDAR\n"
 
 
 def parse_time(raw) -> datetime | None:
-    """Parse epoch millis, epoch seconds, or ISO-8601 string into UTC datetime."""
     if raw is None:
         return None
     if isinstance(raw, (int, float)):
@@ -333,19 +310,12 @@ def shift_to_vevent(shift: dict) -> str | None:
         "scheduledEnd", "endTimestamp", "endAt",
         "endDateTime", "shiftEndTime",
     ))
-    if not start or not end:
-        log.debug("Skipping shift — no parseable times: %s", list(shift.keys()))
-        return None
-
-    # If start == end or end before start, skip
-    if end <= start:
-        log.debug("Skipping shift — end <= start")
+    if not start or not end or end <= start:
         return None
 
     sl = start.astimezone(LOCAL_TZ)
     el = end.astimezone(LOCAL_TZ)
 
-    # Stable UID derived from shift content — guarantees no duplicates on re-run
     uid_seed = f"{start.isoformat()}|{end.isoformat()}|{shift.get('id', '')}"
     uid = hashlib.sha256(uid_seed.encode()).hexdigest()[:32] + "@legion-rona"
 
@@ -393,7 +363,6 @@ def build_ical(shifts: list[dict]) -> str:
         if uid not in seen:
             seen.add(uid)
             vevents.append(vevent)
-
     log.info("Unique events to write: %d", len(vevents))
     return ICAL_HEADER + "\n".join(vevents) + "\n" + ICAL_FOOTER
 
@@ -403,7 +372,6 @@ def build_ical(shifts: list[dict]) -> str:
 # ──────────────────────────────────────────────
 def main() -> None:
     dry_run = "--dry-run" in sys.argv
-
     log.info("RONA Legion iCal Scraper starting …")
     log.info("Endpoint: %s", SCHEDULE_ENDPOINT)
 
@@ -415,7 +383,6 @@ def main() -> None:
         )
 
     log.info("Using LEGION_TOKEN (UUID auth token)")
-
     shifts       = fetch_all_shifts(LEGION_TOKEN)
     ical_content = build_ical(shifts)
 
