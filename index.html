@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RONA Work Schedule – iCal Feed</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 640px; margin: 60px auto; padding: 0 20px; color: #1a1a1a; }
+    h1   { color: #d62b2b; }
+    code { background: #f3f3f3; padding: 2px 6px; border-radius: 4px; font-size: 0.95em; }
+    pre  { background: #f3f3f3; padding: 14px; border-radius: 8px; overflow-x: auto; }
+    .badge { display:inline-block; background:#2563eb; color:#fff; padding:4px 10px; border-radius:4px; font-size:0.85em; }
+    a    { color: #2563eb; }
+  </style>
+</head>
+<body>
+  <h1>🗓 RONA Work Schedule</h1>
+  <p>This page hosts an auto-updating iCal feed generated from the Legion WFM portal.
+     The feed refreshes every 4 hours via GitHub Actions.</p>
+
+  <h2>Subscribe</h2>
+  <p>Copy the URL below and paste it into your calendar app:</p>
+  <pre id="url"><!-- URL injected by Actions --></pre>
+
+  <h3>Google Calendar</h3>
+  <ol>
+    <li>Open Google Calendar → <em>Other calendars</em> → <strong>+ From URL</strong></li>
+    <li>Paste the feed URL above and click <strong>Add calendar</strong></li>
+  </ol>
+
+  <h3>Thunderbird / GNOME Calendar</h3>
+  <ol>
+    <li>File → New → Calendar → <strong>On the Network</strong></li>
+    <li>Choose <em>iCalendar (ICS)</em> and paste the URL</li>
+  </ol>
+
+  <h3>Apple Calendar (iPhone / Mac)</h3>
+  <ol>
+    <li>Settings → Calendar → Accounts → Add Account → <strong>Other</strong></li>
+    <li>Add Subscribed Calendar → paste the URL</li>
+  </ol>
+
+  <p style="color:#888;font-size:0.85em">Last updated by GitHub Actions. Source: Legion WFM via RONA employee portal.</p>
+</body>
+</html>

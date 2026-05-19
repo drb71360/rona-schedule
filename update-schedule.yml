@@ -1,0 +1,69 @@
+name: Update RONA Schedule iCal Feed
+
+on:
+  # Run every 4 hours so the feed stays current
+  schedule:
+    - cron: "0 */4 * * *"
+
+  # Allow triggering manually from the Actions tab
+  workflow_dispatch:
+
+jobs:
+  update-ical:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # needed to push schedule.ics to gh-pages
+
+    steps:
+      # ── 1. Check out the repo ────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── 2. Set up Python ─────────────────────────────────────────
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      # ── 3. Install dependencies ──────────────────────────────────
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      # ── 4. Install Playwright browser (Chromium only) ────────────
+      - name: Install Playwright Chromium
+        run: playwright install chromium --with-deps
+
+      # ── 5. Run the scraper ───────────────────────────────────────
+      - name: Fetch schedule and generate iCal
+        env:
+          LEGION_EMAIL:    ${{ secrets.LEGION_EMAIL }}
+          LEGION_PASSWORD: ${{ secrets.LEGION_PASSWORD }}
+          LEGION_ORG:      ${{ secrets.LEGION_ORG }}
+          LEGION_WEEKS_AHEAD:  "8"
+          LEGION_WEEKS_BEHIND: "2"
+          ICAL_OUTPUT: "schedule.ics"
+          LOG_LEVEL: "INFO"
+        run: python scraper.py
+
+      # ── 6. Publish to GitHub Pages ───────────────────────────────
+      # Pushes only schedule.ics (+ a tiny index.html) to the gh-pages
+      # branch so the file is publicly reachable at:
+      #   https://<your-github-username>.github.io/<repo-name>/schedule.ics
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: .
+          publish_branch: gh-pages
+          # Only publish the calendar file + helper page
+          include_files: |
+            schedule.ics
+            index.html
+          # Commit message shows when it was last updated
+          commit_message: "chore: update schedule.ics [skip ci]"
+          # Keep the branch history short (saves storage)
+          force_orphan: false
+          enable_jekyll: false
