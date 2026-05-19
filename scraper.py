@@ -4,13 +4,10 @@ Legion WFM → iCal Feed Generator  (RONA Enterprise Edition)
 Portal: https://enterprise.legion.work/legion/?enterprise=rona
 
 Confirmed API endpoint:
-  GET or POST /legion/schedule/getScheduleWeekSummary?startOfWeek=<ISO>
+  GET /legion/schedule/getScheduleWeekSummary?startOfWeek=<ISO>
 
 Authentication: LEGION_TOKEN (UUID from localStorage 'legion.authToken')
                 LEGION_DEVICE_ID (DeviceID cookie value)
-
-Week anchoring: uses NEXT Saturday as the base week, matching the portal URL
-  format observed in DevTools (2026-05-23T04:00:00.000Z on Tuesday May 19).
 """
 
 import hashlib
@@ -58,17 +55,7 @@ log = logging.getLogger("legion-ical")
 # Week calculation
 # ──────────────────────────────────────────────────────────────────────
 def week_starts(weeks_behind: int, weeks_ahead: int) -> list[str]:
-    """
-    Return ISO-8601 startOfWeek timestamps for the requested date range.
-
-    Key insight from DevTools capture:
-      - Date captured: 2026-05-23T04:00:00.000Z  (Saturday May 23)
-      - Captured on:   Tuesday May 19
-    The portal shows NEXT week, so we anchor on the NEXT upcoming Saturday.
-    Past Saturdays return HTTP 400 — the server only serves open/published weeks.
-    """
     today = datetime.now(LOCAL_TZ).date()
-    # weekday(): Mon=0 … Sat=5, Sun=6 — days_until_saturday=0 when today IS Saturday
     days_until_saturday = (5 - today.weekday()) % 7
     base = today + timedelta(days=days_until_saturday)   # next (or current) Saturday
 
@@ -83,8 +70,6 @@ def week_starts(weeks_behind: int, weeks_ahead: int) -> list[str]:
 # Auth helpers
 # ──────────────────────────────────────────────────────────────────────
 def auth_variants(token: str) -> list[dict]:
-    """All plausible auth-header formats. 'authToken' first — matches the
-    localStorage key 'legion.authToken' (minus the 'legion.' prefix)."""
     return [
         {"authToken": token},
         {"Authorization": f"Bearer {token}"},
@@ -108,19 +93,20 @@ def cookies() -> dict:
 # ──────────────────────────────────────────────────────────────────────
 def fetch_all_shifts(token: str) -> list[dict]:
     weeks = week_starts(WEEKS_BEHIND, WEEKS_AHEAD)
-    # Probe week = base (offset 0) = next Saturday = confirmed valid date
-    probe_week = weeks[WEEKS_BEHIND]
+    probe_week = weeks[WEEKS_BEHIND]   # offset 0 = next/current Saturday
 
     log.info("Fetching %d week(s), probe week: %s", len(weeks), probe_week)
     log.info("Endpoint: %s", SCHEDULE_ENDPOINT)
 
-    base_headers = {
+    # NOTE: No Content-Type on GET requests — body-less GET + Content-Type
+    # can trigger HTTP 400 on many servers / WAFs.
+    get_headers = {
         "Accept":           "application/json",
-        "Content-Type":     "application/json",
         "Origin":           BASE_URL,
-        "Referer":          f"{APP_URL}/?enterprise={LEGION_ORG}",
+        "Referer":          f"{APP_URL}/?enterprise={LEGION_ORG}#/console/schedule/view",
         "X-Requested-With": "XMLHttpRequest",
     }
+    post_headers = {**get_headers, "Content-Type": "application/json"}
 
     all_shifts: list[dict] = []
     working_auth:   dict | None = None
@@ -134,7 +120,8 @@ def fetch_all_shifts(token: str) -> list[dict]:
                 break
             for auth in auth_variants(token):
                 try:
-                    hdrs  = {**base_headers, **auth}
+                    base  = get_headers if method == "GET" else post_headers
+                    hdrs  = {**base, **auth}
                     label = next(iter(auth)) if auth else "(cookie-only)"
 
                     if method == "GET":
@@ -151,6 +138,14 @@ def fetch_all_shifts(token: str) -> list[dict]:
 
                     log.info("Probe [%s %s]: HTTP %s", method, label, resp.status_code)
 
+                    # ★ Log the 400 body — this tells us exactly what the server wants
+                    if resp.status_code == 400 and not getattr(fetch_all_shifts, "_logged_400", False):
+                        fetch_all_shifts._logged_400 = True
+                        try:
+                            log.info("400 response body: %s", resp.text[:800])
+                        except Exception:
+                            pass
+
                     if resp.status_code == 200:
                         working_auth   = auth
                         working_method = method
@@ -166,20 +161,22 @@ def fetch_all_shifts(token: str) -> list[dict]:
         if working_auth is None:
             raise RuntimeError(
                 "All auth formats failed on both GET and POST.\n\n"
-                "Next step — get the exact request headers from DevTools:\n"
-                "1. Log into https://enterprise.legion.work/legion/?enterprise=rona\n"
-                "2. Right-click → Inspect → Network tab\n"
-                "3. Click 'Fetch/XHR' filter button\n"
-                "4. Navigate to your schedule in the portal\n"
-                "5. Click the getScheduleWeekSummary request\n"
-                "6. Copy ALL 'Request Headers' shown and paste them here.\n\n"
+                "IMPORTANT: Check the '400 response body' line above in the logs.\n"
+                "That message tells us exactly what the server is rejecting.\n\n"
+                "If no body was logged, copy ALL Request Headers from DevTools:\n"
+                "  1. Log into https://enterprise.legion.work/legion/?enterprise=rona\n"
+                "  2. Right-click → Inspect → Network tab → Fetch/XHR filter\n"
+                "  3. Navigate to your schedule\n"
+                "  4. Click the getScheduleWeekSummary request\n"
+                "  5. Copy ALL Request Headers and paste them here.\n\n"
                 "Also verify LEGION_TOKEN is current:\n"
                 "  Application → Local Storage → enterprise.legion.work → legion.authToken"
             )
 
-        # ── Fetch remaining weeks with confirmed auth ───────────────
-        fetched = {probe_week}
-        hdrs    = {**base_headers, **working_auth}
+        # ── Fetch remaining weeks with confirmed auth ────────────────
+        fetched        = {probe_week}
+        base_for_fetch = get_headers if working_method == "GET" else post_headers
+        hdrs           = {**base_for_fetch, **working_auth}
 
         for week in weeks:
             if week in fetched:
@@ -365,7 +362,7 @@ def build_ical(shifts: list[dict]) -> str:
         vevent = shift_to_vevent(shift)
         if not vevent:
             continue
-        m = re.search(r"UID:(.+)", vevent)
+        m   = re.search(r"UID:(.+)", vevent)
         uid = m.group(1) if m else str(uuid.uuid4())
         if uid not in seen:
             seen.add(uid)
