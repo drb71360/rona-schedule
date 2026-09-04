@@ -1,47 +1,41 @@
-name: Update RONA Schedule iCal Feed
+name: Update schedule ICS
 
 on:
-  schedule:
-    - cron: "0 */4 * * *"
   workflow_dispatch:
+  schedule:
+    - cron: "0 */6 * * *"   # runs every 6 hours
+
+permissions:
+  contents: write
 
 jobs:
-  update-ical:
+  update:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
 
     steps:
-      - name: Checkout repository
+      - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v4
         with:
-          python-version: "3.12"
-          cache: "pip"
+          python-version: "3.11"
 
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Fetch schedule and generate iCal
-        env:
-          LEGION_TOKEN:        ${{ secrets.LEGION_TOKEN }}
-          LEGION_ORG:          ${{ secrets.LEGION_ORG }}
-          LEGION_WEEKS_AHEAD:  "8"
-          LEGION_WEEKS_BEHIND: "2"
-          ICAL_OUTPUT:         "schedule.ics"
-          LOG_LEVEL:           "INFO"
+      - name: Run scraper
         run: python scraper.py
 
-      - name: Deploy to GitHub Pages
-        uses: peaceiris/actions-gh-pages@v4
+      - name: Commit updated ICS
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add schedule.ics
+          git commit -m "Auto-update schedule.ics" || echo "No changes to commit"
+
+      - name: Push changes
+        uses: ad-m/github-push-action@v0.8.0
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: .
-          publish_branch: gh-pages
-          include_files: |
-            schedule.ics
-            index.html
-          commit_message: "chore: update schedule.ics [skip ci]"
-          enable_jekyll: false
+          branch: main
